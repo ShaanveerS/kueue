@@ -26,6 +26,7 @@ import (
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 
@@ -84,20 +85,20 @@ func (cqs *CQState) CsvRecord() []string {
 type CQStore map[string]*CQState
 
 type WLEvent struct {
-	Time time.Time
 	types.NamespacedName
-	UID       types.UID
-	ClassName string
-	Admitted  bool
-	Evicted   bool
-	Finished  bool
+	UID              types.UID
+	ClassName        string
+	TimeToAdmitMs    int64
+	TimeToFinishedMs int64
+	Admitted         bool
+	Evicted          bool
+	Finished         bool
 }
 
 type WLState struct {
 	ID int
 	types.NamespacedName
 	ClassName        string
-	FirstEventTime   time.Time
 	TimeToAdmitMs    int64
 	TimeToFinishedMs int64
 	EvictionCount    int32
@@ -187,14 +188,13 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 			ID:             len(r.Store.WL),
 			NamespacedName: ev.NamespacedName,
 			ClassName:      ev.ClassName,
-			FirstEventTime: ev.Time,
 			LastEvent:      &WLEvent{},
 		}
 		r.Store.WL[ev.UID] = state
 	}
 
 	if ev.Admitted && !state.LastEvent.Admitted {
-		state.TimeToAdmitMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToAdmitMs = ev.TimeToAdmitMs
 	}
 
 	if ev.Evicted && !state.LastEvent.Evicted {
@@ -202,7 +202,7 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 	}
 
 	if ev.Finished && !state.LastEvent.Finished {
-		state.TimeToFinishedMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToFinishedMs = ev.TimeToFinishedMs
 	}
 
 	state.LastEvent = ev
@@ -445,21 +445,35 @@ func (r *Recorder) drainCQEvents() {
 	}
 }
 
+func workloadTimeToCondition(wl *kueue.Workload, conditionType string) time.Duration {
+	cond := apimeta.FindStatusCondition(wl.Status.Conditions, conditionType)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return 0
+	}
+	start := wl.CreationTimestamp.Time
+	end := cond.LastTransitionTime.Time
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0
+	}
+	return end.Sub(start)
+}
+
 func (r *Recorder) RecordWorkloadState(wl *kueue.Workload) {
 	if !r.running.Load() {
 		return
 	}
 	ev := &WLEvent{
-		Time: time.Now(),
 		NamespacedName: types.NamespacedName{
 			Namespace: wl.Namespace,
 			Name:      wl.Name,
 		},
-		UID:       wl.UID,
-		ClassName: wl.Labels[generator.ClassLabel],
-		Admitted:  workload.IsAdmitted(wl),
-		Evicted:   workload.IsEvicted(wl),
-		Finished:  workload.IsFinished(wl),
+		UID:              wl.UID,
+		ClassName:        wl.Labels[generator.ClassLabel],
+		TimeToAdmitMs:    workloadTimeToCondition(wl, kueue.WorkloadAdmitted).Milliseconds(),
+		TimeToFinishedMs: workloadTimeToCondition(wl, kueue.WorkloadFinished).Milliseconds(),
+		Admitted:         workload.IsAdmitted(wl),
+		Evicted:          workload.IsEvicted(wl),
+		Finished:         workload.IsFinished(wl),
 	}
 	select {
 	case r.wlEvChan <- ev:
