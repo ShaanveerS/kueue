@@ -1,0 +1,54 @@
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  rebuild:
+    if: |
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/rebuild') &&
+      (github.actor == github.event.issue.user.login ||
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+                github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: read
+    concurrency:
+      group: rebuild-pr-${{ github.event.issue.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Get pull request head
+        id: pr
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            core.setOutput("repository", pull.head.repo.full_name);
+            core.setOutput("ref", pull.head.ref);
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.pr.outputs.repository }}
+          ref: ${{ steps.pr.outputs.ref }}
+          # Depth 2 so the tip's parent is present: the rebuild step amends the
+          # current head commit, and amending at the shallow boundary (depth 1)
+          # would create a parentless commit and rewrite the whole branch
+          # history on force-push.
+          fetch-depth: 2
+
+      - name: Rebuild
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --amend --no-edit
+          git push --force-with-lease
