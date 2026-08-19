@@ -25,7 +25,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/onsi/gomega"
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -1450,7 +1449,6 @@ func TestTruncateAssignment(t *testing.T) {
 func TestTASCachingRemainingResourcesFeatureGate(t *testing.T) {
 	for _, enableCaching := range []bool{true, false} {
 		t.Run(fmt.Sprintf("enableCaching=%t", enableCaching), func(t *testing.T) {
-			g := gomega.NewWithT(t)
 			features.SetFeatureGateDuringTest(t, features.TASCachingRemainingResources, enableCaching)
 
 			_, log := utiltesting.ContextWithLog(t)
@@ -1465,8 +1463,9 @@ func TestTASCachingRemainingResourcesFeatureGate(t *testing.T) {
 			snapshot := newTASFlavorSnapshot(log, "tas-topology", newTopologyTree([]string{"hostname"}, []*corev1.Node{nodeObj}, 0), nil, newDefaultSimulatorSnapshot())
 			domainID := snapshot.nodeToDomain[nodeObj.Name]
 
-			leaf := snapshot.leaves[domainID]
-			g.Expect(leaf).ToNot(gomega.BeNil())
+			if snapshot.leaves[domainID] == nil {
+				t.Fatalf("Expected leaf domain %q to exist", domainID)
+			}
 
 			flavorUsage := workload.TASFlavorUsage{
 				{
@@ -1479,7 +1478,9 @@ func TestTASCachingRemainingResourcesFeatureGate(t *testing.T) {
 			}
 
 			// Warm the Fits cache before adding TAS usage
-			g.Expect(snapshot.Fits(flavorUsage)).To(gomega.BeTrue())
+			if !snapshot.Fits(flavorUsage) {
+				t.Error("Fits() = false, want true before adding TAS usage")
+			}
 
 			// Add TAS usage of 4 CPU (4000m), leaving 4 CPU (8000m - 4000m = 4000m) remaining
 			usage := resources.NewRequestsFromMap(map[corev1.ResourceName]int64{
@@ -1488,13 +1489,17 @@ func TestTASCachingRemainingResourcesFeatureGate(t *testing.T) {
 			snapshot.updateTASUsage(domainID, usage, add, 1)
 
 			// Fits should now return false because 5 CPU > 4 CPU remaining
-			g.Expect(snapshot.Fits(flavorUsage)).To(gomega.BeFalse())
+			if snapshot.Fits(flavorUsage) {
+				t.Error("Fits() = true, want false after adding TAS usage")
+			}
 
 			// Remove TAS usage
 			snapshot.updateTASUsage(domainID, usage, subtract, 1)
 
 			// Fits should now return true again after cache invalidation / re-evaluation
-			g.Expect(snapshot.Fits(flavorUsage)).To(gomega.BeTrue())
+			if !snapshot.Fits(flavorUsage) {
+				t.Error("Fits() = false, want true after removing TAS usage")
+			}
 		})
 	}
 }
